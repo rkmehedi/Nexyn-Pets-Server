@@ -13,8 +13,9 @@ app.use(helmet());
 const corsOptions = {
   origin: [
 
-    
+
     'https://a12rkmehedi.netlify.app',
+    // 'http://localhost:5173',
   ],
   credentials: true,
   optionsSuccessStatus: 200
@@ -82,6 +83,37 @@ async function run() {
       res.send(result);
     });
 
+
+    app.get('/user/:email', verifyToken, async (req, res) => {
+      const email = req.params.email;
+      if (req.decoded.email !== email) {
+        return res.status(403).send({ message: 'forbidden access' });
+      }
+      const query = { email: email };
+      const result = await usersCollection.findOne(query);
+      res.send(result);
+    });
+
+
+    app.patch('/user/:email', verifyToken, async (req, res) => {
+      const email = req.params.email;
+      if (req.decoded.email !== email) {
+        return res.status(403).send({ message: 'forbidden access' });
+      }
+      const updatedData = req.body;
+      const filter = { email: email };
+      const updateDoc = {
+        $set: {
+          name: updatedData.name,
+          phone: updatedData.phone,
+          address: updatedData.address,
+
+        }
+      };
+      const result = await usersCollection.updateOne(filter, updateDoc);
+      res.send(result);
+    });
+
     app.get('/users/admin/:email', verifyToken, async (req, res) => {
       const email = req.params.email;
       if (email !== req.decoded.email) {
@@ -105,20 +137,25 @@ async function run() {
       res.send(result);
     });
 
-    app.get('/pets', async (req, res) => {
-      const page = parseInt(req.query.page) || 0;
-      const limit = parseInt(req.query.limit) || 9;
-      const skip = page * limit;
+     app.get('/pets', async (req, res) => {
+        const page = parseInt(req.query.page) || 0;
+        const limit = parseInt(req.query.limit) || 9;
+        const skip = page * limit;
+        
+        let query = { adopted: { $ne: true } };
+        if (req.query.category) query.petCategory = req.query.category;
+        if (req.query.search) query.petName = { $regex: req.query.search, $options: 'i' };
 
-      let query = { adopted: { $ne: true } };
+        const sortBy = req.query.sortBy || 'dateAdded';
+        const sortOrder = req.query.sortOrder === 'asc' ? 1 : -1;
+        const sortOptions = {};
+        sortOptions[sortBy] = sortOrder;
 
-      if (req.query.category) query.petCategory = req.query.category;
-      if (req.query.search) query.petName = { $regex: req.query.search, $options: 'i' };
-
-      const pets = await petsCollection.find(query).sort({ dateAdded: -1 }).skip(skip).limit(limit).toArray();
-      const total = await petsCollection.countDocuments(query);
-      res.send({ pets, total, currentPage: page, totalPages: Math.ceil(total / limit) });
+        const pets = await petsCollection.find(query).sort(sortOptions).skip(skip).limit(limit).toArray();
+        const total = await petsCollection.countDocuments(query);
+        res.send({ pets, total, currentPage: page, totalPages: Math.ceil(total / limit) });
     });
+
 
 
     app.get('/admin/donations', verifyToken, verifyAdmin, async (req, res) => {
@@ -130,40 +167,78 @@ async function run() {
       const result = await petsCollection.find().toArray();
       res.send(result);
     });
+    app.get('/user/stats/:email', verifyToken, async (req, res) => {
+      const email = req.params.email;
+      if (req.decoded.email !== email) {
+        return res.status(403).send({ message: 'forbidden access' });
+      }
+
+      const petsAdded = await petsCollection.countDocuments({ ownerEmail: email });
+      const campaignsCreated = await donationsCollection.countDocuments({ ownerEmail: email });
+
+      const donationsMadeResult = await paymentsCollection.aggregate([
+        { $match: { donatorEmail: email } },
+        {
+          $group: {
+            _id: null,
+            totalDonated: { $sum: '$donationAmount' }
+          }
+        }
+      ]).toArray();
+
+      const totalDonated = donationsMadeResult.length > 0 ? donationsMadeResult[0].totalDonated : 0;
+
+      res.send({
+        petsAdded,
+        campaignsCreated,
+        totalDonated
+      });
+    });
+
+     app.get('/admin/stats', verifyToken, verifyAdmin, async (req, res) => {
+        const users = await usersCollection.countDocuments();
+        const pets = await petsCollection.countDocuments();
+        const donationsResult = await donationsCollection.aggregate([
+            { $group: { _id: null, totalDonations: { $sum: '$donatedAmount' } } }
+        ]).toArray();
+        const totalDonations = donationsResult.length > 0 ? donationsResult[0].totalDonations : 0;
+        res.send({ users, pets, totalDonations });
+    });
+
 
     app.patch('/adoptions/accept/:id', verifyToken, async (req, res) => {
-    const id = req.params.id;
-    const { petId } = req.body;
-    const filter = { _id: new ObjectId(id) };
-    const adoptionRequest = await adoptionsCollection.findOne(filter);
+      const id = req.params.id;
+      const { petId } = req.body;
+      const filter = { _id: new ObjectId(id) };
+      const adoptionRequest = await adoptionsCollection.findOne(filter);
 
-    if (adoptionRequest.petOwnerEmail !== req.decoded.email) {
+      if (adoptionRequest.petOwnerEmail !== req.decoded.email) {
         return res.status(403).send({ message: 'forbidden access' });
-    }
+      }
 
-    const updateRequest = { $set: { status: 'accepted' } };
-    await adoptionsCollection.updateOne(filter, updateRequest);
+      const updateRequest = { $set: { status: 'accepted' } };
+      await adoptionsCollection.updateOne(filter, updateRequest);
 
-    const filterPet = { _id: new ObjectId(petId) };
-    const updatePet = { $set: { adopted: true } };
-    const result = await petsCollection.updateOne(filterPet, updatePet);
-    
-    res.send(result);
-});
+      const filterPet = { _id: new ObjectId(petId) };
+      const updatePet = { $set: { adopted: true } };
+      const result = await petsCollection.updateOne(filterPet, updatePet);
 
-app.patch('/adoptions/reject/:id', verifyToken, async (req, res) => {
-    const id = req.params.id;
-    const filter = { _id: new ObjectId(id) };
-    const adoptionRequest = await adoptionsCollection.findOne(filter);
+      res.send(result);
+    });
 
-    if (adoptionRequest.petOwnerEmail !== req.decoded.email) {
+    app.patch('/adoptions/reject/:id', verifyToken, async (req, res) => {
+      const id = req.params.id;
+      const filter = { _id: new ObjectId(id) };
+      const adoptionRequest = await adoptionsCollection.findOne(filter);
+
+      if (adoptionRequest.petOwnerEmail !== req.decoded.email) {
         return res.status(403).send({ message: 'forbidden access' });
-    }
+      }
 
-    const updateDoc = { $set: { status: 'rejected' } };
-    const result = await adoptionsCollection.updateOne(filter, updateDoc);
-    res.send(result);
-});
+      const updateDoc = { $set: { status: 'rejected' } };
+      const result = await adoptionsCollection.updateOne(filter, updateDoc);
+      res.send(result);
+    });
 
 
     app.get('/pets/:id', async (req, res) => {
@@ -174,14 +249,14 @@ app.patch('/adoptions/reject/:id', verifyToken, async (req, res) => {
     });
 
     app.get('/pets/user/:email', verifyToken, async (req, res) => {
-    const email = req.params.email;
-    if (req.decoded.email !== email) {
+      const email = req.params.email;
+      if (req.decoded.email !== email) {
         return res.status(403).send({ message: 'forbidden access' });
-    }
-    const query = { ownerEmail: email };
-    const result = await petsCollection.find(query).toArray();
-    res.send(result);
-});
+      }
+      const query = { ownerEmail: email };
+      const result = await petsCollection.find(query).toArray();
+      res.send(result);
+    });
 
     app.post('/pets', verifyToken, async (req, res) => {
       const pet = req.body;
@@ -235,39 +310,39 @@ app.patch('/adoptions/reject/:id', verifyToken, async (req, res) => {
     });
 
     app.patch('/pets/adopt/:id', verifyToken, async (req, res) => {
-  const petId = req.params.id;
-  const { adopted } = req.body;
-  const userEmail = req.decoded.email;
+      const petId = req.params.id;
+      const { adopted } = req.body;
+      const userEmail = req.decoded.email;
 
-  try {
-    const pet = await petsCollection.findOne({ _id: new ObjectId(petId) });
-    if (!pet) {
-      return res.status(404).send({ message: 'Pet not found' });
-    }
+      try {
+        const pet = await petsCollection.findOne({ _id: new ObjectId(petId) });
+        if (!pet) {
+          return res.status(404).send({ message: 'Pet not found' });
+        }
 
-    const user = await usersCollection.findOne({ email: userEmail });
-    if (!user) {
-      return res.status(401).send({ message: 'Unauthorized' });
-    }
+        const user = await usersCollection.findOne({ email: userEmail });
+        if (!user) {
+          return res.status(401).send({ message: 'Unauthorized' });
+        }
 
-    const isOwner = pet.ownerEmail === userEmail;
-    const isAdmin = user.role === 'admin';
+        const isOwner = pet.ownerEmail === userEmail;
+        const isAdmin = user.role === 'admin';
 
-    if (!isOwner && !isAdmin) {
-      return res.status(403).send({ message: 'Forbidden: Not allowed to update this pet' });
-    }
+        if (!isOwner && !isAdmin) {
+          return res.status(403).send({ message: 'Forbidden: Not allowed to update this pet' });
+        }
 
-    const result = await petsCollection.updateOne(
-      { _id: new ObjectId(petId) },
-      { $set: { adopted: adopted } }
-    );
+        const result = await petsCollection.updateOne(
+          { _id: new ObjectId(petId) },
+          { $set: { adopted: adopted } }
+        );
 
-    res.send(result);
-  } catch (err) {
-    console.error(err);
-    res.status(500).send({ message: 'Internal server error' });
-  }
-});
+        res.send(result);
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: 'Internal server error' });
+      }
+    });
 
 
     app.post('/adoptions', verifyToken, async (req, res) => {
@@ -326,20 +401,27 @@ app.patch('/adoptions/reject/:id', verifyToken, async (req, res) => {
     });
 
     app.delete('/admin/donations/:id', verifyToken, verifyAdmin, async (req, res) => {
-    const id = req.params.id;
-    const query = { _id: new ObjectId(id) };
-    const result = await donationsCollection.deleteOne(query);
-    res.send(result);
-});
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await donationsCollection.deleteOne(query);
+      res.send(result);
+    });
 
     app.get('/donations', async (req, res) => {
-      const page = parseInt(req.query.page) || 0;
-      const limit = parseInt(req.query.limit) || 9;
-      const skip = page * limit;
-      const campaigns = await donationsCollection.find().sort({ createdDate: -1 }).skip(skip).limit(limit).toArray();
-      const total = await donationsCollection.countDocuments();
-      res.send({ campaigns, total, currentPage: page, totalPages: Math.ceil(total / limit) });
+        const page = parseInt(req.query.page) || 0;
+        const limit = parseInt(req.query.limit) || 9;
+        const skip = page * limit;
+        
+        const sortBy = req.query.sortBy || 'lastDateOfDonation';
+        const sortOrder = req.query.sortOrder === 'asc' ? 1 : -1;
+        const sortOptions = {};
+        sortOptions[sortBy] = sortOrder;
+
+        const campaigns = await donationsCollection.find().sort(sortOptions).skip(skip).limit(limit).toArray();
+        const total = await donationsCollection.countDocuments();
+        res.send({ campaigns, total, currentPage: page, totalPages: Math.ceil(total / limit) });
     });
+
 
     app.get('/donations/user/:email', verifyToken, async (req, res) => {
       if (req.decoded.email !== req.params.email) return res.status(403).send({ message: 'forbidden access' });
